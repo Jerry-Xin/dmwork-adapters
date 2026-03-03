@@ -113,19 +113,26 @@ export async function handleInboundMessage(params: {
         body: rawBody,
         timestamp: message.timestamp ? message.timestamp * 1000 : Date.now(),
       });
-      while (entries.length > DEFAULT_GROUP_HISTORY_LIMIT) {
+      const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
+      while (entries.length > historyLimit) {
         entries.shift();
       }
       log?.info?.(
-        `dmwork: group message not mentioning bot, recorded as history context`,
+        `dmwork: [HISTORY] 非@消息已缓存 | from=${message.from_uid} | session=${sessionId} | 当前缓存=${entries.length}条`,
       );
       return;
     }
 
     // Bot IS mentioned — prepend history context (manual — avoids SDK format incompatibility)
+    // Sliding window: always include the most recent historyLimit messages
+    const historyLimit = account.config.historyLimit ?? DEFAULT_GROUP_HISTORY_LIMIT;
     let entries = groupHistories.get(sessionId) ?? [];
+    // Take last N entries (sliding window)
+    if (entries.length > historyLimit) {
+      entries = entries.slice(-historyLimit);
+    }
     const historyCountBefore = entries.length;
-    log?.info?.(`dmwork: [MENTION] 收到@消息 | from=${message.from_uid} | 内存缓存=${historyCountBefore}条 | session=${sessionId}`);
+    log?.info?.(`dmwork: [MENTION] 收到@消息 | from=${message.from_uid} | 缓存=${historyCountBefore}条 | historyLimit=${historyLimit} | session=${sessionId}`);
 
     // If memory cache is empty, try fetching from API
     if (entries.length === 0 && account.config.botToken) {
@@ -154,21 +161,20 @@ export async function handleInboundMessage(params: {
 
     // Build history context manually (JSON format)
     if (entries.length > 0) {
-      historyPrefix = "Chat history since last reply (untrusted, for context):\n```json\n" +
+      historyPrefix = "【群聊历史记录】以下是你上次回复后群里其他人说的话（sender 是用户ID，body 是消息内容）：\n```json\n" +
         JSON.stringify(entries.map((e: any) => ({
           sender: e.sender,
-          timestamp_ms: e.timestamp,
           body: e.body,
         })), null, 2) +
-        "\n```\n\n";
+        "\n```\n请根据这些历史上下文来回复当前的@消息。\n\n";
       log?.info?.(`dmwork: [MENTION] 已注入历史上下文 | ${historyPrefix.length} chars | ${entries.length}条消息`);
     } else {
       log?.info?.(`dmwork: [MENTION] 无历史上下文可注入`);
     }
 
-    // Clear history after consuming (manual approach)
-    groupHistories.delete(sessionId);
-    log?.info?.(`dmwork: [MENTION] 历史队列已清空 | session=${sessionId}`);
+    // Sliding window: keep history, don't clear
+    // (entries stay in queue, limited by historyLimit in the caching logic)
+    log?.info?.(`dmwork: [MENTION] 历史滑动窗口 | session=${sessionId} | 队列保留`);
   }
 
   const core = getDmworkRuntime();
@@ -215,6 +221,13 @@ export async function handleInboundMessage(params: {
 
   const finalBody = (historyPrefix || quotePrefix) ? (historyPrefix + quotePrefix + rawBody) : rawBody;
 
+  // DEBUG: 检查 finalBody 是否包含历史
+  log?.info?.(`dmwork: [DEBUG] historyPrefix长度=${historyPrefix.length} | quotePrefix长度=${quotePrefix.length} | rawBody长度=${rawBody.length}`);
+  log?.info?.(`dmwork: [DEBUG] finalBody长度=${finalBody.length} | 包含历史=${finalBody.includes('群聊历史记录')}`);
+  if (historyPrefix) {
+    log?.info?.(`dmwork: [DEBUG] historyPrefix前200字: ${historyPrefix.substring(0, 200)}`);
+  }
+
   const body = core.channel.reply.formatAgentEnvelope({
     channel: "DMWork",
     from: fromLabel,
@@ -224,8 +237,13 @@ export async function handleInboundMessage(params: {
     body: finalBody,
   });
 
+  // DEBUG: 检查 formatAgentEnvelope 输出
+  log?.info?.(`dmwork: [DEBUG] body长度=${body.length} | 包含历史=${body.includes('群聊历史记录')}`);
+  log?.info?.(`dmwork: [DEBUG] body前300字: ${body.substring(0, 300)}`);
+
   const ctxPayload = core.channel.reply.finalizeInboundContext({
     Body: body,
+    BodyForAgent: body,  // ← 关键！AI 实际读取的是这个字段！
     RawBody: rawBody,
     CommandBody: rawBody,
     From: `dmwork:${message.from_uid}`,
@@ -243,6 +261,10 @@ export async function handleInboundMessage(params: {
     OriginatingChannel: "dmwork",
     OriginatingTo: `dmwork:${sessionId}`,
   });
+
+  // DEBUG: 检查 ctxPayload 最终内容
+  log?.info?.(`dmwork: [DEBUG] ctxPayload.Body长度=${ctxPayload.Body?.length ?? 0} | 包含历史=${ctxPayload.Body?.includes('群聊历史记录') ?? false}`);
+  log?.info?.(`dmwork: [DEBUG] ctxPayload.Body前300字: ${ctxPayload.Body?.substring(0, 300) ?? 'undefined'}`);
 
   await core.channel.session.recordInboundSession({
     storePath,
