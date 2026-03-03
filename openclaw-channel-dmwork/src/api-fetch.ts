@@ -149,6 +149,7 @@ export async function fetchBotGroups(params: {
 
 /**
  * 获取频道历史消息（用于注入上下文）
+ * @param params.log - Optional logger for consistent logging with OpenClaw log system
  */
 export async function getChannelMessages(params: {
   apiUrl: string;
@@ -157,6 +158,7 @@ export async function getChannelMessages(params: {
   channelType: ChannelType;
   limit?: number;
   signal?: AbortSignal;
+  log?: { info?: (...args: any[]) => void; error?: (...args: any[]) => void };
 }): Promise<Array<{ from_uid: string; content: string; timestamp: number }>> {
   try {
     const url = `${params.apiUrl.replace(/\/+$/, "")}/v1/bot/channel/messages`;
@@ -175,7 +177,7 @@ export async function getChannelMessages(params: {
     });
 
     if (!response.ok) {
-      console.log(`[dmwork] getChannelMessages failed: ${response.status}`);
+      params.log?.info?.(`dmwork: getChannelMessages failed: ${response.status}`);
       return [];
     }
 
@@ -186,7 +188,7 @@ export async function getChannelMessages(params: {
       timestamp: m.timestamp ?? Math.floor(Date.now() / 1000),  // API timestamps are in seconds
     }));
   } catch (err) {
-    console.log(`[dmwork] getChannelMessages error: ${err}`);
+    params.log?.error?.(`dmwork: getChannelMessages error: ${err}`);
     return [];
   }
 }

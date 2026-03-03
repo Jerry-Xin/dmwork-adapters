@@ -145,6 +145,7 @@ export async function handleInboundMessage(params: {
           channelId: message.channel_id!,
           channelType: ChannelType.Group,
           limit: fetchLimit,
+          log,
         });
         entries = apiMessages
           .filter((m: any) => m.from_uid !== botUid && m.content && !m.content.includes(`@${botUid}`))
