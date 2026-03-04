@@ -168,6 +168,14 @@ export async function handleInboundMessage(params: {
           if (m.name && m.uid) {
             memberMap.set(m.name, m.uid);
             uidToNameMap.set(m.uid, m.name);
+            
+            // Also save name without leading emoji for faster lookup
+            // (complements findUidByName's emoji-tolerant matching)
+            const nameWithoutEmoji = stripEmoji(m.name);
+            if (nameWithoutEmoji && nameWithoutEmoji !== m.name && !memberMap.has(nameWithoutEmoji)) {
+              memberMap.set(nameWithoutEmoji, m.uid);
+              log?.debug?.(`dmwork: [CACHE] Added emoji alias: "${nameWithoutEmoji}" -> "${m.uid}"`);
+            }
           }
         }
         groupCacheTimestamps.set(sessionId, now);
