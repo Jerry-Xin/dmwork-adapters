@@ -175,7 +175,13 @@ export async function getGroupMembers(params: {
       return [];
     }
     const data = await resp.json();
-    return data.members ?? data ?? [];
+    // Normalize to strict array to prevent silent failures
+    const members = Array.isArray(data?.members)
+      ? data.members
+      : Array.isArray(data)
+        ? data
+        : [];
+    return members as GroupMember[];
   } catch (err) {
     console.log(`[dmwork] getGroupMembers error: ${err}`);
     return [];

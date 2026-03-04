@@ -164,7 +164,7 @@ export async function handleInboundMessage(params: {
     const contentMentions = rawBody.match(/@[\w\u4e00-\u9fa5.]+/g) ?? [];
     
     if (contentMentions.length > 0 && allMentionUids.length > 0) {
-      log?.info?.(`dmwork: [MAPPING] content @names: ${JSON.stringify(contentMentions)}, mention.uids: ${JSON.stringify(allMentionUids)}`);
+      log?.debug?.(`dmwork: [MAPPING] content @names: ${JSON.stringify(contentMentions)}, mention.uids: ${JSON.stringify(allMentionUids)}`);
       
       // Pair them in order
       const pairCount = Math.min(contentMentions.length, allMentionUids.length);
@@ -175,11 +175,11 @@ export async function handleInboundMessage(params: {
           // Update both mappings
           if (!memberMap.has(displayName)) {
             memberMap.set(displayName, uid);
-            log?.info?.(`dmwork: [MAPPING] learned name->uid: "${displayName}" -> "${uid}"`);
+            log?.debug?.(`dmwork: [MAPPING] learned name->uid mapping`);
           }
           if (!uidToNameMap.has(uid)) {
             uidToNameMap.set(uid, displayName);
-            log?.info?.(`dmwork: [MAPPING] learned uid->name: "${uid}" -> "${displayName}"`);
+            log?.debug?.(`dmwork: [MAPPING] learned uid->name mapping`);
           }
         }
       }
@@ -192,7 +192,7 @@ export async function handleInboundMessage(params: {
     const isMentioned = mentionAll || mentionUids.includes(botUid);
     
     // Debug: log received mention info
-    log?.info?.(`dmwork: [RECV] mention payload: uids=${JSON.stringify(mentionUids)}, all=${mentionAll}, botUid=${botUid}, originalMentionUids=${JSON.stringify(originalMentionUids)}`);
+    log?.debug?.(`dmwork: [RECV] mention payload: uidsCount=${mentionUids.length}, all=${mentionAll}, originalCount=${originalMentionUids.length}`);
 
     if (!isMentioned) {
       // Record as pending history context (manual — avoids SDK format incompatibility)
@@ -224,7 +224,7 @@ export async function handleInboundMessage(params: {
       entries = entries.slice(-historyLimit);
     }
     const historyCountBefore = entries.length;
-    log?.info?.(`dmwork: [MENTION] 收到@消息 | from=${message.from_uid} | 缓存=${historyCountBefore}条 | historyLimit=${historyLimit} | session=${sessionId}`);
+    log?.info?.(`dmwork: [MENTION] 收到@消息 | 缓存=${historyCountBefore}条 | historyLimit=${historyLimit}`);
 
     // If memory cache is empty, try fetching from API
     if (entries.length === 0 && account.config.botToken) {
@@ -398,11 +398,11 @@ export async function handleInboundMessage(params: {
           // Parse all @mentions from content (support Chinese, English, dots, underscores, hex uids)
           const contentMentions = content.match(/@[\w\u4e00-\u9fa5.]+/g) ?? [];
           
-          log?.info?.(`dmwork: [REPLY] content @mentions: ${JSON.stringify(contentMentions)}`);
-          log?.info?.(`dmwork: [REPLY] memberMap size: ${memberMap.size}, uidToNameMap size: ${uidToNameMap.size}`);
+          log?.debug?.(`dmwork: [REPLY] content @mentions count: ${contentMentions.length}`);
+          log?.debug?.(`dmwork: [REPLY] memberMap size: ${memberMap.size}, uidToNameMap size: ${uidToNameMap.size}`);
           
           // Track if we need to retry after cache refresh
-          let unresolvedNames: string[] = [];
+          let unresolvedNames: { name: string; index: number }[] = [];
           
           // Helper to resolve a single mention
           const resolveMention = (name: string): { uid: string | null; newContent: string } => {
@@ -411,17 +411,17 @@ export async function handleInboundMessage(params: {
             let newContent = finalContent;
             
             if (uid) {
-              log?.info?.(`dmwork: [REPLY] resolved displayName @${name} -> uid ${uid}`);
+              log?.debug?.(`dmwork: [REPLY] resolved displayName to uid`);
               return { uid, newContent };
             } else if (/^[a-f0-9]{32}$/i.test(name)) {
               // Looks like a hex uid (32 chars) - try to find display name
               const displayName = uidToNameMap.get(name);
               if (displayName) {
                 newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                log?.info?.(`dmwork: [REPLY] replaced uid @${name} -> displayName @${displayName}`);
+                log?.debug?.(`dmwork: [REPLY] replaced uid with displayName`);
                 return { uid: name, newContent };
               } else {
-                log?.warn?.(`dmwork: [REPLY] unknown uid @${name}, no displayName found`);
+                log?.warn?.(`dmwork: [REPLY] unknown hex uid, no displayName found`);
                 return { uid: name, newContent };
               }
             } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
@@ -429,10 +429,10 @@ export async function handleInboundMessage(params: {
               const displayName = uidToNameMap.get(name);
               if (displayName) {
                 newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                log?.info?.(`dmwork: [REPLY] replaced uid @${name} -> displayName @${displayName}`);
+                log?.debug?.(`dmwork: [REPLY] replaced uid with displayName`);
                 return { uid: name, newContent };
               } else {
-                log?.info?.(`dmwork: [REPLY] using @${name} as uid directly`);
+                log?.debug?.(`dmwork: [REPLY] using mention as uid directly`);
                 return { uid: name, newContent };
               }
             } else {
@@ -441,15 +441,15 @@ export async function handleInboundMessage(params: {
             }
           };
           
-          // First pass: try to resolve all mentions
+          // First pass: try to resolve all mentions, tracking indices for order preservation
+          const resolvedUids: (string | null)[] = [];
           for (const mention of contentMentions) {
             const name = mention.slice(1);
             const result = resolveMention(name);
             finalContent = result.newContent;
-            if (result.uid) {
-              replyMentionUids.push(result.uid);
-            } else {
-              unresolvedNames.push(name);
+            resolvedUids.push(result.uid); // null if unresolved
+            if (!result.uid) {
+              unresolvedNames.push({ name, index: resolvedUids.length - 1 });
             }
           }
           
@@ -459,12 +459,12 @@ export async function handleInboundMessage(params: {
             const refreshed = await refreshGroupMemberCache(true);
             
             if (refreshed) {
-              // Retry unresolved names
-              for (const name of unresolvedNames) {
+              // Retry unresolved names and insert at original positions
+              for (const { name, index } of unresolvedNames) {
                 const uid = memberMap.get(name);
                 if (uid) {
-                  replyMentionUids.push(uid);
-                  log?.info?.(`dmwork: [REPLY] after refresh: resolved @${name} -> ${uid}`);
+                  resolvedUids[index] = uid; // Insert at original position
+                  log?.debug?.(`dmwork: [REPLY] after refresh: resolved @${name}`);
                 } else {
                   log?.warn?.(`dmwork: [REPLY] after refresh: still cannot resolve @${name}`);
                 }
@@ -472,9 +472,12 @@ export async function handleInboundMessage(params: {
             }
           }
           
+          // Build final mention UIDs array preserving original order
+          replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
+          
           if (replyMentionUids.length > 0) {
-            log?.info?.(`dmwork: [REPLY] final mentionUids: ${JSON.stringify(replyMentionUids)}`);
-            log?.info?.(`dmwork: [REPLY] final content: ${finalContent.substring(0, 100)}...`);
+            log?.debug?.(`dmwork: [REPLY] final mentionUids count: ${replyMentionUids.length}`);
+            log?.debug?.(`dmwork: [REPLY] final content length: ${finalContent.length}`);
           }
         }
 
