@@ -34,38 +34,41 @@ export const DEFAULT_HISTORY_PROMPT_TEMPLATE =
   "[Group Chat History] Below are messages from others since your last reply (sender is user ID, body is message content):\n```json\n{messages}\n```\nPlease respond to the current @mention based on this context.\n\n";
 
 // JSON Schema for OpenClaw plugin config validation
-export const DmworkConfigJsonSchema = {
-  schema: {
-    type: "object" as const,
-    properties: {
-      name: { type: "string" },
-      enabled: { type: "boolean" },
-      botToken: { type: "string" },
-      apiUrl: { type: "string" },
-      wsUrl: { type: "string" },
-      pollIntervalMs: { type: "number", minimum: 500 },
-      heartbeatIntervalMs: { type: "number", minimum: 5000 },
-      requireMention: { type: "boolean" },
-      botUid: { type: "string" },
-      historyLimit: { type: "number", minimum: 1, maximum: 100 },
-      historyPromptTemplate: { type: "string" },
-      accounts: {
+const DmworkConfigJsonSchemaRaw = {
+  type: "object" as const,
+  properties: {
+    name: { type: "string" },
+    enabled: { type: "boolean" },
+    botToken: { type: "string" },
+    apiUrl: { type: "string" },
+    wsUrl: { type: "string" },
+    pollIntervalMs: { type: "number", minimum: 500 },
+    heartbeatIntervalMs: { type: "number", minimum: 5000 },
+    requireMention: { type: "boolean" },
+    botUid: { type: "string" },
+    historyLimit: { type: "number", minimum: 1, maximum: 100 },
+    historyPromptTemplate: { type: "string" },
+    accounts: {
+      type: "object",
+      additionalProperties: {
         type: "object",
-        additionalProperties: {
-          type: "object",
-          properties: {
-            name: { type: "string" },
-            enabled: { type: "boolean" },
-            botToken: { type: "string" },
-            apiUrl: { type: "string" },
-            wsUrl: { type: "string" },
-            requireMention: { type: "boolean" },
-            botUid: { type: "string" },
-            historyLimit: { type: "number", minimum: 1, maximum: 100 },
-            historyPromptTemplate: { type: "string" },
-          },
+        properties: {
+          name: { type: "string" },
+          enabled: { type: "boolean" },
+          botToken: { type: "string" },
+          apiUrl: { type: "string" },
+          wsUrl: { type: "string" },
+          requireMention: { type: "boolean" },
+          botUid: { type: "string" },
+          historyLimit: { type: "number", minimum: 1, maximum: 100 },
+          historyPromptTemplate: { type: "string" },
         },
       },
     },
   },
+};
+
+// Wrapped schema for ChannelPlugin.configSchema (requires schema property)
+export const DmworkConfigJsonSchema = {
+  schema: DmworkConfigJsonSchemaRaw,
 };
