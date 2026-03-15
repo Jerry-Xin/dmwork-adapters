@@ -145,13 +145,59 @@ function guessMime(pathOrName?: string, fallback = "application/octet-stream"): 
   return map[ext] ?? fallback;
 }
 
-interface ResolvedContent {
+export interface ResolvedContent {
   text: string;
   mediaUrl?: string;
   mediaType?: string;
 }
 
-function resolveContent(payload: BotMessage["payload"], apiUrl?: string): ResolvedContent {
+export interface ForwardUser {
+  uid: string;
+  name: string;
+}
+
+export interface ForwardMessage {
+  message_id?: string;
+  from_uid: string;
+  timestamp?: number;
+  payload: {
+    type: number;
+    content?: string;
+    url?: string;
+    name?: string;
+    users?: ForwardUser[];
+    msgs?: ForwardMessage[];
+  };
+}
+
+/** Resolve inner message type to display text for MultipleForward */
+export function resolveInnerMessageText(payload: ForwardMessage["payload"]): string {
+  if (!payload) return "";
+  switch (payload.type) {
+    case MessageType.Text:
+      return payload.content ?? "";
+    case MessageType.Image:
+      return "[图片]";
+    case MessageType.GIF:
+      return "[GIF]";
+    case MessageType.Voice:
+      return "[语音]";
+    case MessageType.Video:
+      return "[视频]";
+    case MessageType.Location:
+      return "[位置信息]";
+    case MessageType.Card:
+      return "[名片]";
+    case MessageType.File:
+      return payload.name ? `[文件: ${payload.name}]` : "[文件]";
+    case MessageType.MultipleForward:
+      return "[合并转发]";
+    default:
+      return payload.content ?? "[消息]";
+  }
+}
+
+export function resolveContent(payload: BotMessage["payload"], apiUrl?: string): ResolvedContent {
   if (!payload) return { text: "" };
 
   const makeFullUrl = (relUrl?: string) => {
@@ -202,6 +248,21 @@ function resolveContent(payload: BotMessage["payload"], apiUrl?: string): Resolv
       const cardUid = payload.uid ?? "";
       const cardText = cardUid ? `[名片: ${cardName} (${cardUid})]` : `[名片: ${cardName}]`;
       return { text: cardText };
+    }
+    case MessageType.MultipleForward: {
+      const users: ForwardUser[] = (payload as any).users ?? [];
+      const msgs: ForwardMessage[] = (payload as any).msgs ?? [];
+      const userMap = new Map<string, string>();
+      for (const u of users) {
+        if (u.uid && u.name) userMap.set(u.uid, u.name);
+      }
+      const lines: string[] = ["[合并转发: 聊天记录]"];
+      for (const m of msgs) {
+        const senderName = userMap.get(m.from_uid) ?? m.from_uid;
+        const content = resolveInnerMessageText(m.payload);
+        lines.push(`${senderName}: ${content}`);
+      }
+      return { text: lines.join("\n") };
     }
     default:
       return { text: payload.content ?? payload.url ?? "" };
@@ -264,7 +325,7 @@ async function resolveFileContent(
 }
 
 /** Placeholder text for non-text API history messages */
-function resolveApiMessagePlaceholder(type?: number, name?: string): string {
+export function resolveApiMessagePlaceholder(type?: number, name?: string): string {
   switch (type) {
     case MessageType.Image: return "[图片]";
     case MessageType.GIF: return "[GIF]";
@@ -273,6 +334,7 @@ function resolveApiMessagePlaceholder(type?: number, name?: string): string {
     case MessageType.File: return `[文件: ${name ?? "未知文件"}]`;
     case MessageType.Location: return "[位置信息]";
     case MessageType.Card: return "[名片]";
+    case MessageType.MultipleForward: return "[合并转发]";
     default: return "[消息]";
   }
 }
