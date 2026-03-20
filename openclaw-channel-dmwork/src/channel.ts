@@ -19,6 +19,7 @@ import { parseMentions } from "./mention-utils.js";
 import { handleDmworkMessageAction, parseTarget } from "./actions.js";
 import { createDmworkManagementTools } from "./agent-tools.js";
 import { getOrCreateGroupMdCache, registerBotGroupIds, getKnownGroupIds } from "./group-md.js";
+import { stripSpacePrefix } from "./utils.js";
 import path from "path";
 import os from "os";
 import { mkdir, readFile, writeFile } from "fs/promises";
@@ -114,6 +115,9 @@ function cleanupStaleCaches(): void {
 
 // Known bot robot_ids across all accounts — for bot-to-bot loop prevention
 const _knownBotUids = new Set<string>();
+
+// Cache botToken → robot_id so outbound handlers can resolve DM fakeChannelIDs
+const _botTokenToRobotId = new Map<string, string>();
 
 // Singleton timer to prevent accumulation during hot reload (#54)
 let _cleanupTimer: NodeJS.Timeout | null = null;
@@ -286,6 +290,14 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
       let mentionUids: string[] = [];
       let targetForParse = ctx.to;
 
+      // If targetForParse is a fakeChannelID (e.g. "sd7d36a_uid1@sd7d36a_jeff_bot"), extract the other party
+      if (targetForParse.includes("@") && !targetForParse.startsWith("group:")) {
+        const dmParts = targetForParse.split("@");
+        const botId = _botTokenToRobotId.get(account.config.botToken!) ?? "";
+        // Find the part that is NOT the bot, keep Space prefix
+        targetForParse = stripSpacePrefix(dmParts[0]) === botId ? dmParts[1] : dmParts[0];
+      }
+
       // Handle "group:channel_id@uid1,uid2" format — extract inline mention UIDs
       if (ctx.to.startsWith("group:")) {
         const groupPart = ctx.to.slice(6);
@@ -405,6 +417,14 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       // 4. Parse target using shared parseTarget + knownGroupIds
       let targetForParse = ctx.to;
+
+      // If targetForParse is a fakeChannelID (e.g. "sd7d36a_uid1@sd7d36a_jeff_bot"), extract the other party
+      if (targetForParse.includes("@") && !targetForParse.startsWith("group:")) {
+        const dmParts = targetForParse.split("@");
+        const botId = _botTokenToRobotId.get(account.config.botToken!) ?? "";
+        targetForParse = stripSpacePrefix(dmParts[0]) === botId ? dmParts[1] : dmParts[0];
+      }
+
       if (ctx.to.startsWith("group:")) {
         const groupPart = ctx.to.slice(6);
         const atIdx = groupPart.indexOf("@");
@@ -506,6 +526,8 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
 
       // Track this bot's uid for bot-to-bot loop prevention
       _knownBotUids.add(credentials.robot_id);
+      // Cache robot_id for outbound DM routing
+      _botTokenToRobotId.set(account.config.botToken!, credentials.robot_id);
 
       log?.info?.(
         `[${account.accountId}] bot registered as ${credentials.robot_id}`,
@@ -620,7 +642,7 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
           // when channel_type === 1 without '@'. The plain-uid case needs no extra filter
           // since each bot has its own WS connection.
           if (msg.channel_type === ChannelType.DM && msg.channel_id && msg.channel_id.includes("@")) {
-            const parts = msg.channel_id.split("@");
+            const parts = msg.channel_id.split("@").map(stripSpacePrefix);
             if (!parts.includes(credentials.robot_id)) {
               log?.info?.(
                 `dmwork: [${account.accountId}] skipping DM not for this bot: channel=${msg.channel_id} bot=${credentials.robot_id}`,
