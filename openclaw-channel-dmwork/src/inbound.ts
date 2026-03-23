@@ -570,27 +570,30 @@ export async function handleInboundMessage(params: {
   }
 
   // Parse space_id from channel_id (format: s{spaceId}_{peerId})
-  // For DM, channel_id is a fake channel: s{spaceId}_{uid1}@s{spaceId}_{uid2}
-  // Use LastIndex approach: spaceId is everything between 's' and the last '_' before peerId
+  // spaceId is always a 32-char hex string (UUID without dashes).
+  // Channel formats:
+  //   DM simple:   s{32hex}_{peerId}           (peerId may contain underscores like poly_bot)
+  //   DM compound: s{32hex}_{uid1}@s{32hex}_{uid2}
+  //   Group:       plain group_no (no space prefix)
   let spaceId = "";
-  const effectiveChannelId = isGroup ? message.channel_id! : message.from_uid;
-  if (effectiveChannelId.startsWith("s")) {
-    const lastUnderscore = effectiveChannelId.lastIndexOf("_");
-    if (lastUnderscore > 0) {
-      spaceId = effectiveChannelId.substring(1, lastUnderscore);
+
+  // Helper: extract spaceId from a string starting with 's' followed by 32 hex + '_'
+  const extractSpaceId = (s: string): string => {
+    if (s.length > 34 && s[0] === "s" && s[33] === "_" && /^[0-9a-f]{32}$/.test(s.substring(1, 33))) {
+      return s.substring(1, 33);
     }
-  }
-  // Also try to extract spaceId from the WS channel_id (compound DM format)
-  if (!spaceId && message.channel_id && message.channel_id.startsWith("s")) {
-    // DM compound: s{spaceId}_{uid1}@s{spaceId}_{uid2}
+    return "";
+  };
+
+  // Try channel_id first (most reliable source for DM)
+  if (message.channel_id) {
     const atIdx = message.channel_id.indexOf("@");
     const firstPart = atIdx > 0 ? message.channel_id.substring(0, atIdx) : message.channel_id;
-    if (firstPart.startsWith("s")) {
-      const lastUnderscore = firstPart.lastIndexOf("_");
-      if (lastUnderscore > 0) {
-        spaceId = firstPart.substring(1, lastUnderscore);
-      }
-    }
+    spaceId = extractSpaceId(firstPart);
+  }
+  // Fallback: try from_uid (for group messages where channel_id has no space prefix)
+  if (!spaceId && message.from_uid) {
+    spaceId = extractSpaceId(message.from_uid);
   }
 
   // Session ID: include spaceId for Space isolation (same user in different Spaces = different sessions)
