@@ -899,7 +899,13 @@ export async function handleInboundMessage(params: {
 
   statusSink?.({ lastInboundAt: Date.now(), lastError: null });
 
-  const replyChannelId = isGroup ? message.channel_id! : message.from_uid;
+  // Use space-prefixed channelId for DM replies to maintain Space isolation.
+  // If the incoming message was from a Space context (spaceId extracted), reply to s{spaceId}_{from_uid}.
+  const replyChannelId = isGroup
+    ? message.channel_id!
+    : spaceId
+      ? `s${spaceId}_${message.from_uid}`
+      : message.from_uid;
   const replyChannelType = isGroup ? ChannelType.Group : ChannelType.DM;
 
   // 已读回执 + 正在输入 — fire-and-forget
