@@ -590,10 +590,12 @@ export async function handleInboundMessage(params: {
     const atIdx = message.channel_id.indexOf("@");
     const firstPart = atIdx > 0 ? message.channel_id.substring(0, atIdx) : message.channel_id;
     spaceId = extractSpaceId(firstPart);
+    log?.debug?.(`dmwork: spaceId extraction: channel_id=${message.channel_id} firstPart=${firstPart} spaceId=${spaceId}`);
   }
   // Fallback: try from_uid (for group messages where channel_id has no space prefix)
   if (!spaceId && message.from_uid) {
     spaceId = extractSpaceId(message.from_uid);
+    log?.debug?.(`dmwork: spaceId fallback from_uid=${message.from_uid} spaceId=${spaceId}`);
   }
 
   // Session ID: include spaceId for Space isolation (same user in different Spaces = different sessions)
