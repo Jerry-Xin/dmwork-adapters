@@ -1201,3 +1201,167 @@ describe("sendMessage — mentionAll serialization", () => {
     expect(sentBody.payload.mention).toBeUndefined();
   });
 });
+
+// ========== Stream API Tests ==========
+
+describe("streamStart", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should call /v1/bot/stream/start and return stream_no", async () => {
+    let capturedBody: any;
+    global.fetch = vi.fn(async (url: string, init: any) => {
+      capturedBody = JSON.parse(init.body);
+      return {
+        ok: true,
+        text: async () => JSON.stringify({ stream_no: "sn-abc123" }),
+      };
+    }) as unknown as typeof fetch;
+
+    const { streamStart } = await import("./api-fetch.js");
+    const result = await streamStart({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "ch1",
+      channelType: ChannelType.Group,
+    });
+
+    expect(result).toBe("sn-abc123");
+    expect(capturedBody.channel_id).toBe("ch1");
+    expect(capturedBody.channel_type).toBe(ChannelType.Group);
+    // payload should be base64-encoded JSON
+    const decoded = JSON.parse(Buffer.from(capturedBody.payload, "base64").toString());
+    expect(decoded.type).toBe(MessageType.Text);
+    expect(decoded.content).toBe("");
+  });
+
+  it("should return empty string when response has no stream_no", async () => {
+    global.fetch = vi.fn(async () => ({
+      ok: true,
+      text: async () => JSON.stringify({}),
+    })) as unknown as typeof fetch;
+
+    const { streamStart } = await import("./api-fetch.js");
+    const result = await streamStart({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "ch1",
+      channelType: ChannelType.DM,
+    });
+
+    expect(result).toBe("");
+  });
+});
+
+describe("streamSend", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should call /v1/bot/sendMessage with stream_no and content", async () => {
+    let capturedBody: any;
+    global.fetch = vi.fn(async (url: string, init: any) => {
+      capturedBody = JSON.parse(init.body);
+      return { ok: true, text: async () => "" };
+    }) as unknown as typeof fetch;
+
+    const { streamSend } = await import("./api-fetch.js");
+    await streamSend({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      streamNo: "sn-xyz",
+      channelId: "ch1",
+      channelType: ChannelType.Group,
+      content: "Hello world",
+    });
+
+    expect(capturedBody.stream_no).toBe("sn-xyz");
+    expect(capturedBody.channel_id).toBe("ch1");
+    expect(capturedBody.payload.type).toBe(MessageType.Text);
+    expect(capturedBody.payload.content).toBe("Hello world");
+  });
+});
+
+describe("streamEnd", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should call /v1/bot/stream/end with stream_no", async () => {
+    let capturedBody: any;
+    let capturedUrl: string = "";
+    global.fetch = vi.fn(async (url: string, init: any) => {
+      capturedUrl = url as string;
+      capturedBody = JSON.parse(init.body);
+      return { ok: true, text: async () => "" };
+    }) as unknown as typeof fetch;
+
+    const { streamEnd } = await import("./api-fetch.js");
+    await streamEnd({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      streamNo: "sn-end",
+      channelId: "ch1",
+      channelType: ChannelType.Group,
+    });
+
+    expect(capturedUrl).toContain("/v1/bot/stream/end");
+    expect(capturedBody.stream_no).toBe("sn-end");
+    expect(capturedBody.channel_id).toBe("ch1");
+    expect(capturedBody.channel_type).toBe(ChannelType.Group);
+  });
+});
+
+describe("sendMessage with replyMsgId", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("should include reply field when replyMsgId is provided", async () => {
+    let sentBody: any;
+    global.fetch = vi.fn(async (_url: string, init: any) => {
+      sentBody = JSON.parse(init.body);
+      return { ok: true, text: async () => "" };
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "ch1",
+      channelType: ChannelType.Group,
+      content: "replying",
+      replyMsgId: "msg-123",
+    });
+
+    expect(sentBody.payload.reply).toEqual({ message_id: "msg-123" });
+  });
+
+  it("should NOT include reply field when replyMsgId is not provided", async () => {
+    let sentBody: any;
+    global.fetch = vi.fn(async (_url: string, init: any) => {
+      sentBody = JSON.parse(init.body);
+      return { ok: true, text: async () => "" };
+    }) as unknown as typeof fetch;
+
+    const { sendMessage } = await import("./api-fetch.js");
+    await sendMessage({
+      apiUrl: "http://localhost:8090",
+      botToken: "test-token",
+      channelId: "ch1",
+      channelType: ChannelType.Group,
+      content: "no reply",
+    });
+
+    expect(sentBody.payload.reply).toBeUndefined();
+  });
+});

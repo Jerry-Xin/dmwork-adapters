@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { STRUCTURED_MENTION_PATTERN } from "./mention-utils.js";
 
 // ─── Token refresh cooldown tests ───────────────────────────────────────────
 // These test the time-based cooldown pattern used in channel.ts onError handler
@@ -286,6 +287,119 @@ describe("hasAtAll regex — @所有人 support", () => {
 });
 
 // ─── sendText v2 structured mention handling (unit logic) ─────────────────────
+
+// ─── shouldTreatDeliveredTextAsVisible tests ─────────────────────────────────
+
+describe("shouldTreatDeliveredTextAsVisible", () => {
+  it("should mark non-empty block text as visible", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const hook = (dmworkPlugin.outbound as any).shouldTreatDeliveredTextAsVisible;
+    expect(hook).toBeDefined();
+    expect(hook({ kind: "block", text: "Hello world" })).toBe(true);
+  });
+
+  it("should NOT mark empty block text as visible", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const hook = (dmworkPlugin.outbound as any).shouldTreatDeliveredTextAsVisible;
+    expect(hook({ kind: "block", text: "" })).toBe(false);
+  });
+
+  it("should NOT mark whitespace-only block text as visible", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const hook = (dmworkPlugin.outbound as any).shouldTreatDeliveredTextAsVisible;
+    expect(hook({ kind: "block", text: "   " })).toBe(false);
+  });
+
+  it("should NOT mark undefined block text as visible", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const hook = (dmworkPlugin.outbound as any).shouldTreatDeliveredTextAsVisible;
+    expect(hook({ kind: "block", text: undefined })).toBe(false);
+  });
+
+  it("should NOT mark tool kind as visible", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const hook = (dmworkPlugin.outbound as any).shouldTreatDeliveredTextAsVisible;
+    expect(hook({ kind: "tool", text: "result" })).toBe(false);
+  });
+
+  it("should NOT mark final kind as visible (final is always visible in framework)", async () => {
+    const { dmworkPlugin } = await import("./channel.js");
+    const hook = (dmworkPlugin.outbound as any).shouldTreatDeliveredTextAsVisible;
+    expect(hook({ kind: "final", text: "done" })).toBe(false);
+  });
+});
+
+// ─── buildFinalEdit guard logic tests ────────────────────────────────────────
+
+describe("buildFinalEdit guard logic", () => {
+  // These tests verify the guard conditions used in the deliver callback's
+  // buildFinalEdit function to determine if preview-finalized path is safe.
+  it("should allow pure text without reply or mention", () => {
+    const finalText = "Hello, this is a simple reply";
+    const hasReplyTo = false;
+    const hasMentionSyntax = STRUCTURED_MENTION_PATTERN.test(finalText);
+    STRUCTURED_MENTION_PATTERN.lastIndex = 0;
+    const hasMedia = false;
+
+    const canFinalize = finalText && !hasMedia && !hasReplyTo && !hasMentionSyntax;
+    expect(canFinalize).toBeTruthy();
+  });
+
+  it("should block when payload has replyToId", () => {
+    const finalText = "Reply text";
+    const hasReplyTo = true;
+    const hasMentionSyntax = false;
+    const hasMedia = false;
+
+    const canFinalize = finalText && !hasMedia && !hasReplyTo && !hasMentionSyntax;
+    expect(canFinalize).toBeFalsy();
+  });
+
+  it("should block when payload has @[uid:name] mention", () => {
+    const finalText = "Hey @[abc123:张三] check this";
+    const hasReplyTo = false;
+    const hasMentionSyntax = STRUCTURED_MENTION_PATTERN.test(finalText);
+    STRUCTURED_MENTION_PATTERN.lastIndex = 0;
+    const hasMedia = false;
+
+    expect(hasMentionSyntax).toBe(true);
+    const canFinalize = finalText && !hasMedia && !hasReplyTo && !hasMentionSyntax;
+    expect(canFinalize).toBeFalsy();
+  });
+
+  it("should block when payload has media", () => {
+    const finalText = "Image caption";
+    const hasReplyTo = false;
+    const hasMentionSyntax = false;
+    const hasMedia = true;
+
+    const canFinalize = finalText && !hasMedia && !hasReplyTo && !hasMentionSyntax;
+    expect(canFinalize).toBeFalsy();
+  });
+
+  it("should block when finalText is empty", () => {
+    const finalText = "";
+    const hasReplyTo = false;
+    const hasMentionSyntax = false;
+    const hasMedia = false;
+
+    const canFinalize = finalText && !hasMedia && !hasReplyTo && !hasMentionSyntax;
+    expect(canFinalize).toBeFalsy();
+  });
+
+  it("should reset STRUCTURED_MENTION_PATTERN lastIndex after test", () => {
+    const text1 = "@[abc:name1] hello @[def:name2]";
+    STRUCTURED_MENTION_PATTERN.test(text1);
+    // Without reset, lastIndex would be non-zero
+    expect(STRUCTURED_MENTION_PATTERN.lastIndex).toBeGreaterThan(0);
+    STRUCTURED_MENTION_PATTERN.lastIndex = 0;
+
+    // After reset, should match from beginning
+    const text2 = "@[xyz:name3]";
+    expect(STRUCTURED_MENTION_PATTERN.test(text2)).toBe(true);
+    STRUCTURED_MENTION_PATTERN.lastIndex = 0;
+  });
+});
 
 describe("sendText v2 mention processing logic", () => {
   it("should convert @[uid:name] to @name + entities", async () => {

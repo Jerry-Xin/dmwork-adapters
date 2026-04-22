@@ -1,5 +1,5 @@
 import type { ChannelLogSink, OpenClawConfig } from "openclaw/plugin-sdk";
-import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo } from "./api-fetch.js";
+import { sendMessage, sendReadReceipt, sendTyping, getChannelMessages, getGroupMembers, getGroupMd, postJson, sendMediaMessage, inferContentType, ensureTextCharset, parseImageDimensions, parseImageDimensionsFromFile, getUploadCredentials, uploadFileToCOS, fetchUserInfo, streamSend, streamEnd } from "./api-fetch.js";
 import type { ResolvedDmworkAccount } from "./accounts.js";
 import type { BotMessage } from "./types.js";
 import { ChannelType, MessageType } from "./types.js";
@@ -14,9 +14,12 @@ import {
   parseStructuredMentions,
   convertStructuredMentions,
   buildEntitiesFromFallback,
+  STRUCTURED_MENTION_PATTERN,
 } from "./mention-utils.js";
 import type { MentionPayload, MentionEntity } from "./types.js";
 import { registerGroupAccount, ensureGroupMd, handleGroupMdEvent, broadcastGroupMdUpdate, extractParentGroupNo, extractThreadShortId, ensureThreadMd, handleThreadMdEvent } from "./group-md.js";
+import { createDmworkDraftStream } from "./draft-stream.js";
+import { deliverFinalizableDraftPreview } from "./draft-preview-finalizer.js";
 import { createWriteStream } from "node:fs";
 import { mkdir, unlink, readdir, stat } from "node:fs/promises";
 import { join, basename } from "node:path";
@@ -1491,162 +1494,281 @@ export async function handleInboundMessage(params: {
     sendTyping({ apiUrl, botToken, channelId: replyChannelId, channelType: replyChannelType }).catch(() => {});
   }, 5000);
 
+  // ── Create draft stream for real-time preview ──
+  const draftStream = createDmworkDraftStream({
+    apiUrl,
+    botToken,
+    channelId: replyChannelId,
+    channelType: replyChannelType,
+    log: (msg) => log?.debug?.(msg),
+    warn: (msg) => log?.warn?.(msg),
+  });
+
+  let draftFinalDeliveryHandled = false;
+  let hasStreamedMessage = false;
+
+  // Shared deliver logic — sends text with full mention/reply support via sendMessage
+  const deliverMessageNormally = async (payload: {
+    text?: string;
+    mediaUrls?: string[];
+    mediaUrl?: string;
+    replyToId?: string | null;
+  }): Promise<boolean> => {
+    // Resolve outbound media URLs
+    const outboundMediaUrls = resolveOutboundMediaUrls(payload);
+
+    // Upload and send each media file
+    for (const mediaUrl of outboundMediaUrls) {
+      try {
+        await uploadAndSendMedia({
+          mediaUrl,
+          apiUrl: account.config.apiUrl,
+          botToken: account.config.botToken ?? "",
+          channelId: replyChannelId,
+          channelType: replyChannelType,
+          log,
+        });
+      } catch (err) {
+        log?.error?.(`dmwork: media send failed for ${mediaUrl}: ${String(err)}`);
+      }
+    }
+
+    // If there are no media URLs, fall through to text logic; if there are, only send text if caption exists
+    const content = payload.text?.trim() ?? "";
+    if (!content && outboundMediaUrls.length > 0) {
+      statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+      return true;
+    }
+    if (!content) return true;
+
+    // Build mentionUids + entities from @mentions in content
+    // Supports both @[uid:name] (v2 structured) and @name (v1 fallback)
+    let replyMentionUids: string[] = [];
+    let replyMentionEntities: MentionEntity[] = [];
+    let finalContent = content;
+
+    if (isGroup) {
+      const structuredMentions = parseStructuredMentions(content);
+
+      if (structuredMentions.length > 0) {
+        // v2 path: LLM used @[uid:name] format
+        const validUids = new Set(uidToNameMap.keys());
+        const converted = convertStructuredMentions(
+          content,
+          structuredMentions,
+          validUids,
+        );
+        finalContent = converted.content;
+        replyMentionEntities = [...converted.entities];
+
+        // Mixed scenario: check for remaining @name in converted content
+        const remaining = buildEntitiesFromFallback(finalContent, memberMap);
+        const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
+        for (const rm of remaining.entities) {
+          if (!existingOffsets.has(rm.offset)) {
+            replyMentionEntities.push(rm);
+          }
+        }
+
+        log?.debug?.(
+          `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
+        );
+      } else {
+        // v1 fallback path: LLM used @name format
+        // Keep existing resolveMention logic for hex uid / uid-format handling
+        const contentMentions = extractMentionMatches(content);
+
+        let unresolvedNames: { name: string; index: number }[] = [];
+
+        const resolveMention = (name: string): { uid: string | null; newContent: string } => {
+          let uid = findUidByName(name, memberMap);
+          let newContent = finalContent;
+
+          if (uid) {
+            return { uid, newContent };
+          } else if (/^[a-f0-9]{32}$/i.test(name)) {
+            const displayName = uidToNameMap.get(name);
+            if (displayName) {
+              newContent = newContent.replace(`@${name}`, `@${displayName}`);
+              return { uid: name, newContent };
+            }
+            return { uid: name, newContent };
+          } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
+            const displayName = uidToNameMap.get(name);
+            if (displayName) {
+              newContent = newContent.replace(`@${name}`, `@${displayName}`);
+              return { uid: name, newContent };
+            }
+            return { uid: name, newContent };
+          }
+          return { uid: null, newContent };
+        };
+
+        const resolvedUids: (string | null)[] = [];
+        for (const mention of contentMentions) {
+          const name = mention.slice(1);
+          const result = resolveMention(name);
+          finalContent = result.newContent;
+          resolvedUids.push(result.uid);
+          if (!result.uid) {
+            unresolvedNames.push({ name, index: resolvedUids.length - 1 });
+          }
+        }
+
+        if (unresolvedNames.length > 0) {
+          log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
+          const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
+          if (refreshed) {
+            for (const { name, index } of unresolvedNames) {
+              const uid = findUidByName(name, memberMap);
+              if (uid) {
+                resolvedUids[index] = uid;
+              }
+            }
+          }
+        }
+
+        replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
+        // Build entities from fallback for the final content
+        const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
+        replyMentionEntities = fallbackResult.entities;
+      }
+
+      // Sort entities by offset and rebuild uids from sorted entities
+      if (replyMentionEntities.length > 0) {
+        replyMentionEntities.sort((a, b) => a.offset - b.offset);
+        replyMentionUids = replyMentionEntities.map((e) => e.uid);
+      }
+    }
+
+    // Detect @all/@所有人 in final content
+    const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
+
+    await sendMessage({
+      apiUrl: account.config.apiUrl,
+      botToken: account.config.botToken ?? "",
+      channelId: replyChannelId,
+      channelType: replyChannelType,
+      content: finalContent,
+      ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
+      ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
+      mentionAll: hasAtAll || undefined,
+      replyMsgId: payload.replyToId ?? undefined,
+    });
+
+    statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+    return true;
+  };
+
   try {
   await core.channel.reply.dispatchReplyWithBufferedBlockDispatcher({
     ctx: ctxPayload,
     cfg: config,
-    replyOptions: {},
+    // Layer 1: draft stream provides preview; blocks flow through deliver()
+    // so shouldTreatDeliveredTextAsVisible fires even when Stream API is unavailable
+    replyOptions: {
+      onPartialReply: (payload: { text?: string }) => {
+        if (payload.text) {
+          draftStream.update(payload.text);
+          hasStreamedMessage = true;
+        }
+      },
+      // Layer 4: reset stream on new assistant message (multi-turn tool calls)
+      onAssistantMessageStart: () => {
+        if (hasStreamedMessage) {
+          draftStream.forceNewMessage();
+        }
+      },
+    },
     dispatcherOptions: {
       deliver: async (payload: {
         text?: string;
         mediaUrls?: string[];
         mediaUrl?: string;
         replyToId?: string | null;
-      }) => {
-        // Resolve outbound media URLs
-        const outboundMediaUrls = resolveOutboundMediaUrls(payload);
-
-        // Upload and send each media file
-        for (const mediaUrl of outboundMediaUrls) {
-          try {
-            await uploadAndSendMedia({
-              mediaUrl,
-              apiUrl: account.config.apiUrl,
-              botToken: account.config.botToken ?? "",
-              channelId: replyChannelId,
-              channelType: replyChannelType,
-              log,
-            });
-          } catch (err) {
-            log?.error?.(`dmwork: media send failed for ${mediaUrl}: ${String(err)}`);
+      }, info: { kind: string }) => {
+        // Block dispatch: when draft stream is active, it already shows the
+        // preview via onPartialReply, so skip redundant message delivery.
+        // When draft stream is NOT active (Stream API unavailable), deliver
+        // blocks normally so shouldTreatDeliveredTextAsVisible marks them visible.
+        if (info.kind === "block") {
+          if (!draftStream.isActive()) {
+            await deliverMessageNormally(payload);
           }
-        }
-
-        // If there are no media URLs, fall through to text logic; if there are, only send text if caption exists
-        const content = payload.text?.trim() ?? "";
-        if (!content && outboundMediaUrls.length > 0) {
-          statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
           return;
         }
-        if (!content) return;
 
-        // Build mentionUids + entities from @mentions in content
-        // Supports both @[uid:name] (v2 structured) and @name (v1 fallback)
-        let replyMentionUids: string[] = [];
-        let replyMentionEntities: MentionEntity[] = [];
-        let finalContent = content;
+        // Layer 2: final stage → deliverFinalizableDraftPreview
+        if (info.kind === "final") {
+          draftFinalDeliveryHandled = true;
 
-        if (isGroup) {
-          const structuredMentions = parseStructuredMentions(content);
+          const hasReplyTo = Boolean(payload.replyToId);
+          const finalText = payload.text?.trim();
+          const hasMentionSyntax = typeof finalText === "string"
+            && STRUCTURED_MENTION_PATTERN.test(finalText);
+          // Reset lastIndex (STRUCTURED_MENTION_PATTERN has global flag)
+          STRUCTURED_MENTION_PATTERN.lastIndex = 0;
 
-          if (structuredMentions.length > 0) {
-            // v2 path: LLM used @[uid:name] format
-            const validUids = new Set(uidToNameMap.keys());
-            const converted = convertStructuredMentions(
-              content,
-              structuredMentions,
-              validUids,
-            );
-            finalContent = converted.content;
-            replyMentionEntities = [...converted.entities];
-
-            // Mixed scenario: check for remaining @name in converted content
-            const remaining = buildEntitiesFromFallback(finalContent, memberMap);
-            const existingOffsets = new Set(replyMentionEntities.map((e) => e.offset));
-            for (const rm of remaining.entities) {
-              if (!existingOffsets.has(rm.offset)) {
-                replyMentionEntities.push(rm);
-              }
-            }
-
-            log?.debug?.(
-              `dmwork: [REPLY] structured mentions: ${structuredMentions.length}, fallback: ${remaining.entities.length}`,
-            );
-          } else {
-            // v1 fallback path: LLM used @name format
-            // Keep existing resolveMention logic for hex uid / uid-format handling
-            const contentMentions = extractMentionMatches(content);
-
-            let unresolvedNames: { name: string; index: number }[] = [];
-
-            const resolveMention = (name: string): { uid: string | null; newContent: string } => {
-              let uid = findUidByName(name, memberMap);
-              let newContent = finalContent;
-
-              if (uid) {
-                return { uid, newContent };
-              } else if (/^[a-f0-9]{32}$/i.test(name)) {
-                const displayName = uidToNameMap.get(name);
-                if (displayName) {
-                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                  return { uid: name, newContent };
-                }
-                return { uid: name, newContent };
-              } else if (/^[a-zA-Z0-9_]+$/.test(name)) {
-                const displayName = uidToNameMap.get(name);
-                if (displayName) {
-                  newContent = newContent.replace(`@${name}`, `@${displayName}`);
-                  return { uid: name, newContent };
-                }
-                return { uid: name, newContent };
-              }
-              return { uid: null, newContent };
-            };
-
-            const resolvedUids: (string | null)[] = [];
-            for (const mention of contentMentions) {
-              const name = mention.slice(1);
-              const result = resolveMention(name);
-              finalContent = result.newContent;
-              resolvedUids.push(result.uid);
-              if (!result.uid) {
-                unresolvedNames.push({ name, index: resolvedUids.length - 1 });
-              }
-            }
-
-            if (unresolvedNames.length > 0) {
-              log?.info?.(`dmwork: [REPLY] ${unresolvedNames.length} unresolved names, force refreshing cache...`);
-              const refreshed = await refreshGroupMemberCache({ sessionId: memberCacheGroupNo, memberMap, uidToNameMap, groupCacheTimestamps, apiUrl: account.config.apiUrl, botToken: account.config.botToken ?? "", forceRefresh: true, log });
-              if (refreshed) {
-                for (const { name, index } of unresolvedNames) {
-                  const uid = findUidByName(name, memberMap);
-                  if (uid) {
-                    resolvedUids[index] = uid;
-                  }
-                }
-              }
-            }
-
-            replyMentionUids = resolvedUids.filter((uid): uid is string => uid !== null);
-            // Build entities from fallback for the final content
-            const fallbackResult = buildEntitiesFromFallback(finalContent, memberMap);
-            replyMentionEntities = fallbackResult.entities;
-          }
-
-          // Sort entities by offset and rebuild uids from sorted entities
-          if (replyMentionEntities.length > 0) {
-            replyMentionEntities.sort((a, b) => a.offset - b.offset);
-            replyMentionUids = replyMentionEntities.map((e) => e.uid);
+          const result = await deliverFinalizableDraftPreview({
+            kind: info.kind,
+            payload,
+            draft: {
+              flush: async () => { await draftStream.flush(); },
+              clear: draftStream.clear,
+              discardPending: draftStream.discardPending,
+              seal: draftStream.seal,
+              id: draftStream.streamId,
+            },
+            buildFinalEdit: () => {
+              // preview-finalized path only for pure text, no reply, no mention
+              if (!finalText) return undefined;
+              if (payload.mediaUrl || payload.mediaUrls?.length) return undefined;
+              if (hasReplyTo) return undefined;
+              if (hasMentionSyntax) return undefined;
+              return { content: finalText };
+            },
+            editFinal: async (streamNoId: string, edit: { content: string }) => {
+              await streamSend({
+                apiUrl,
+                botToken,
+                streamNo: streamNoId,
+                channelId: replyChannelId,
+                channelType: replyChannelType,
+                content: edit.content,
+              });
+              await streamEnd({
+                apiUrl,
+                botToken,
+                streamNo: streamNoId,
+                channelId: replyChannelId,
+                channelType: replyChannelType,
+              });
+            },
+            deliverNormally: async () => {
+              return deliverMessageNormally(payload);
+            },
+            logPreviewEditFailure: (err: unknown) => {
+              log?.warn?.(`dmwork: draft finalize failed: ${String(err)}`);
+            },
+          });
+          if (result !== "normal-skipped") {
+            return;
           }
         }
 
-        // Detect @all/@所有人 in final content
-        const hasAtAll = /(?:^|(?<=\s))@(?:all|所有人)(?=\s|[^\w]|$)/i.test(finalContent);
-
-        await sendMessage({
-          apiUrl: account.config.apiUrl,
-          botToken: account.config.botToken ?? "",
-          channelId: replyChannelId,
-          channelType: replyChannelType,
-          content: finalContent,
-          ...(replyMentionUids.length > 0 ? { mentionUids: replyMentionUids } : {}),
-          ...(replyMentionEntities.length > 0 ? { mentionEntities: replyMentionEntities } : {}),
-          mentionAll: hasAtAll || undefined,
-        });
-
-        statusSink?.({ lastOutboundAt: Date.now(), lastError: null });
+        // Non-final or deliverFinalizableDraftPreview skipped → standard deliver
+        await deliverMessageNormally(payload);
       },
       onError: async (err: unknown, info: { kind: string }) => {
+        // Cleanup draft stream on error
+        try {
+          await draftStream.discardPending();
+          if (draftStream.streamId()) {
+            await draftStream.clear();
+          }
+        } catch {
+          // best-effort
+        }
         clearInterval(typingInterval);
         log?.error?.(`dmwork ${info.kind} reply failed: ${String(err)}`);
         try {
@@ -1664,6 +1786,18 @@ export async function handleInboundMessage(params: {
     },
   });
   } finally {
-    clearInterval(typingInterval);
+    // Layer 3: cleanup — close stream on error/abort
+    try {
+      if (!draftFinalDeliveryHandled) {
+        await draftStream.discardPending();
+      }
+      if (!draftFinalDeliveryHandled && draftStream.streamId()) {
+        await draftStream.clear();
+      }
+    } catch (err) {
+      log?.warn?.(`dmwork: draft cleanup failed: ${String(err)}`);
+    } finally {
+      clearInterval(typingInterval);
+    }
   }
 }

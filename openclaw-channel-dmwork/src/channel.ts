@@ -380,6 +380,16 @@ export const dmworkPlugin: ChannelPlugin<ResolvedDmworkAccount> = {
   },
   outbound: {
     deliveryMode: "direct",
+    // Visibility hook — not yet part of the SDK type surface in 2026.3.2,
+    // so we use a type-level escape hatch here.
+    ...({
+      shouldTreatDeliveredTextAsVisible: (params: {
+        kind: "tool" | "block" | "final";
+        text?: string;
+      }): boolean => {
+        return params.kind === "block" && typeof params.text === "string" && params.text.trim().length > 0;
+      },
+    } as Record<string, unknown>),
     sendText: async (ctx) => {
       // Resolve correct accountId — framework may pass wrong one for multi-bot setups
       const accountId = resolveOutboundAccountId(

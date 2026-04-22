@@ -1145,3 +1145,66 @@ export async function leaveThread(params: {
     throw new Error(`leaveThread failed (${resp.status}): ${text || resp.statusText}`);
   }
 }
+
+// ========== Stream API ==========
+
+/**
+ * Start a new stream session. Returns the stream_no identifier.
+ */
+export async function streamStart(params: {
+  apiUrl: string;
+  botToken: string;
+  channelId: string;
+  channelType: ChannelType;
+}): Promise<string> {
+  const payload = Buffer.from(
+    JSON.stringify({ type: MessageType.Text, content: "" }),
+  ).toString("base64");
+  const result = await postJson<{ stream_no: string }>(
+    params.apiUrl,
+    params.botToken,
+    "/v1/bot/stream/start",
+    {
+      channel_id: params.channelId,
+      channel_type: params.channelType,
+      payload,
+    },
+  );
+  return result?.stream_no ?? "";
+}
+
+/**
+ * Send accumulated text to an active stream (replaces previous content).
+ */
+export async function streamSend(params: {
+  apiUrl: string;
+  botToken: string;
+  streamNo: string;
+  channelId: string;
+  channelType: ChannelType;
+  content: string;
+}): Promise<void> {
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/sendMessage", {
+    stream_no: params.streamNo,
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+    payload: { type: MessageType.Text, content: params.content },
+  });
+}
+
+/**
+ * End a stream session (finalizes the preview message).
+ */
+export async function streamEnd(params: {
+  apiUrl: string;
+  botToken: string;
+  streamNo: string;
+  channelId: string;
+  channelType: ChannelType;
+}): Promise<void> {
+  await postJson(params.apiUrl, params.botToken, "/v1/bot/stream/end", {
+    stream_no: params.streamNo,
+    channel_id: params.channelId,
+    channel_type: params.channelType,
+  });
+}
