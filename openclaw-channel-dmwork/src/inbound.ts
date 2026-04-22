@@ -1502,7 +1502,11 @@ export async function handleInboundMessage(params: {
         mediaUrls?: string[];
         mediaUrl?: string;
         replyToId?: string | null;
-      }) => {
+      }, info: { kind: string }) => {
+        // Block-phase deliveries are intermediate snapshots during tool calls.
+        // Suppress entirely — final phase will deliver the complete text and any media.
+        if (info?.kind === "block") return;
+
         // Resolve outbound media URLs
         const outboundMediaUrls = resolveOutboundMediaUrls(payload);
 
